@@ -7,13 +7,56 @@ editor_options:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+
+# Data Download, Extract and Prepare
 library("RSelenium")
-library("purrr")
 library("stringr")
 library("xml2")
 library("tidyr")
-library("data.table")
 library("readxl")
+
+# Data Manipulation, Aggregation
+library("data.table")
+library("purrr")
+
+# Plotting
+library("ggplot2")
+library("plotly")
+library("shiny")
+library("shinyjs")
+
+seconds_in_a_day <- (60 * 24 * 60) 
+
+excelToRDate <- function(x, event_date) {
+  stopifnot(inherits(event_date, "POSIXlt"))
+  # convert to proportion of seconds, like the rest of the data
+  start_time <- with(event_date, 60 * 60 * hour + 60 * min + sec) / seconds_in_a_day
+  
+  # possible incorrect reporting of date means we're just taking the time and
+  # will adjust the date ourselvess
+  num_x      <- as.numeric(x)
+  times      <- num_x %% 1
+  date_times <- ifelse(round(times, 6) < round(start_time, 6), times + 1, times) + as.numeric(as.Date(event_date))
+  
+  # convert to date/time... + 0.25 to convert from UTC to CST
+  as.POSIXct(
+      x      = as.Date(date_times + 0.25, origin = "1970-01-01")
+    , tz     = "America/Chicago"
+  )
+}
+
+distances <- structure(list(checkpoint = 1:8, checkpoint_name = structure(c(1L, 3L, 5L, 
+3L, 1L, 6L, 4L, 2L), .Label = c("Butler Lake", "Finish", "Greenbush", 
+"Highway H", "Highway P", "Mauthe Lake"), class = "factor"), 
+    mi_to_prev = c(7.5, 8.08, 7.09, 7.09, 8.08, 7.5, 8.92, 8.92
+    ), cumulative_mi = c(7.5, 15.58, 22.67, 29.76, 37.84, 45.34, 
+    54.26, 63.18)), class = "data.frame", row.names = c(NA, -8L
+)) %>% as.data.table()
+
+```
+
+
+```{r data-download}
 
 rD <- rsDriver(browser = "chrome", verbose = FALSE)
 remDr <- rD[["client"]]
@@ -36,25 +79,7 @@ rD[["server"]]$stop()
 
 temp_dir <- tempdir()
 
-seconds_in_a_day <- (60 * 24 * 60) 
 
-excelToRDate <- function(x, event_date) {
-  stopifnot(inherits(event_date, "POSIXlt"))
-  # convert to proportion of seconds, like the rest of the data
-  start_time <- with(event_date, 60 * 60 * hour + 60 * min + sec) / seconds_in_a_day
-  
-  # possible incorrect reporting of date means we're just taking the time and
-  # will adjust the date ourselvess
-  num_x      <- as.numeric(x)
-  times      <- num_x %% 1
-  date_times <- ifelse(times < start_time, times + 1, times) + as.numeric(as.Date(event_date))
-  
-  # convert to date/time... + 0.25 to convert from UTC to CST
-  as.POSIXct(
-      x      = as.Date(date_times + 0.25, origin = "1970-01-01")
-    , tz     = "America/Chicago"
-  )
-}
 
 excel_links <- keep(result_links, ~tools::file_ext(.) %in% c("xls", "xlsx")) 
 result_year <- basename(excel_links) %>% str_extract("\\d{4}")
@@ -133,6 +158,9 @@ event_start_2016 <- as.POSIXlt("2016-01-16 10:00:00 CDT")
 cn_2016 <- c("bib", "overall_place", "division_place", "full_name", "division", "status", "start_time", "cp1_in", "cp1_out", "cp2_in", "cp2_out", "cp3_in", "cp3_out", "cp4_in", "cp4_out", "cp5_in", "cp5_out", "cp6_in", "cp6_out", "cp7_in", "cp7_out", "finish_time", "time_elapsed", "miles")
 raw_2016 <- read_excel(local_files[['2016']], range = "A2:X132", col_names = cn_2016, col_types = "text", na = c("", "X", "DNS", "DNF", "DROP")) %>% as.data.table()
 
+raw_2016[, start_time := NULL]
+raw_2016[!is.na(overall_place), start_time := as.Date(event_start_2016)]
+
 # cp5_in - 0.5
 raw_2016[full_name == "Matthew Berlin", cp5_in := as.character(as.numeric(cp5_in) + 0.5)]
 
@@ -141,12 +169,14 @@ raw_2016[full_name == "Matthew Berlin", cp5_in := as.character(as.numeric(cp5_in
 raw_2016[full_name == "Dan Kolar", c("cp4_in", "cp4_out") := NA]
 
 # drop some columns we'll calculate ourselves
-raw_2016[, c("overall_place", "division_place", "status", "bib") := NULL]
+raw_2016[, c("overall_place", "division_place", "status", "bib", "time_elapsed") := NULL]
 
 # convert all checkpoints and start/end times to R POSIXct objects
 cp_cols <- grep("^cp", names(raw_2016), value = TRUE)
 date_cn <- c(cp_cols, grep("_time", names(raw_2016), value = TRUE))
 raw_2016[, (date_cn) := lapply(.SD, excelToRDate, event_date = event_start_2016), .SDcols = date_cn]
+
+raw_2016[, start_time := as.POSIXct(event_start_2016)]
 
 all_results[['2016']] <- raw_2016
 
@@ -196,6 +226,8 @@ cp_cols <- grep("^cp", names(raw_2015), value = TRUE)
 date_cn <- c(cp_cols, grep("_time", names(raw_2015), value = TRUE))
 raw_2015[, (date_cn) := lapply(.SD, excelToRDate, event_date = event_start_2015), .SDcols = date_cn]
 
+raw_2015[, start_time := as.POSIXct(event_start_2015)]
+
 all_results[['2015']] <- raw_2015
 
 ```
@@ -210,8 +242,8 @@ raw_2014[, c("overall_place", "official", "time_elapsed", "bib") := NULL]
 
 ##### fixes based on QCs
 # mistakenly recorded cp5 checkout as PM instead of AM the next morning
-raw_2014[full_name %in% c("Amanda Runnion", "James Devine", "Piotr Tancula"), `:=`(
-  cp5_in = as.character(as.numeric(cp5_in) + 0.5)
+raw_2014[full_name %in% c("Amanda Runnion", "James Devine", "Piotr Tancula", "Robert Baade"), `:=`(
+  cp5_in = as.character(as.numeric(cp5_in) - 0.5)
 )]
 
 # convert all checkpoints and start/end times to R POSIXct objects
@@ -249,9 +281,12 @@ cn_2012 <- c("bib", "full_name", "division", "start_time", "cp1_in", "cp1_out", 
 raw_2012 <- read_excel(local_files[['2012']], skip = 1L, sheet = "Raw Data", col_names = cn_2012, col_types = "text", na = c("", "X")) %>% as.data.table()
 
 # drop some columns we'll calculate ourselves
-raw_2012[, c("drop", "time_elapsed") := NULL]
+raw_2012[, c("drop", "time_elapsed", "bib") := NULL]
 
 ### fixes base on QC
+# stopped at checkpoint 4, no need for an "out" time
+raw_2012[full_name %in% c("Danny Bobrow", "Eric Alverez"), cp4_out := NA]
+
 # just a mistake? looks like their partner left at 1:25 too, so setting to that
 raw_2012[full_name == "Brian Van Weelden", cp1_out := as.character(as.numeric(cp1_out) + (60 ^ 2) / seconds_in_a_day)] 
 
@@ -287,6 +322,7 @@ raw_2011 <- read_excel(local_files[['2011']], skip = 1L, col_names = cn_2011, co
 # drop some columns we'll calculate ourselves
 place_cn <- grep("place", names(raw_2011), value = TRUE)
 raw_2011[, (place_cn) := NULL]
+raw_2011[, c("elapsed_time") := NULL]
 
 # convert all checkpoints and start/end times to R POSIXct objects
 cp_cols <- grep("^cp", names(raw_2011), value = TRUE)
@@ -345,6 +381,7 @@ raw_2009 <- read_excel(local_files[['2009']], sheet = "Results - Detailed Inform
 
 drop_calls <- names(raw_2009) %>% grep("(split|break)", ., value = TRUE)
 raw_2009[, (drop_calls) := NULL]
+raw_2009[, c("bib") := NULL]
 
 # convert all checkpoints and start/end times to R POSIXct objects
 cp_cols <- grep("^cp", names(raw_2009), value = TRUE)
@@ -385,33 +422,8 @@ raw_2008[, (date_cn) := lapply(.SD, excelToRDate, event_date = event_start_2008)
 # drop some columns we'll calculate ourselves
 raw_2008[, division_place := NULL]
 
-
-# check that the times make sense by melting and reshaping the data to calculate the 
-# length of breaks at checkpoints and the time between checkpoints
-team_cols <- c("full_name", "division", "start_time", "finish_time")
-molten_2008 <- melt.data.table(raw_2008, id.vars = team_cols, variable.name = "cp_status", value.name = "time", measure.vars = cp_cols, na.rm = TRUE)
-
-# split the checkpoint in/out into two variables... e.g cp2_in -> checkpoint = 2, in_out = "in"
-molten_2008[, c("checkpoint", "in_out") := tstrsplit(cp_status, "_")]
-molten_2008[, checkpoint := as.integer(gsub("cp", "", checkpoint))]
-
-cast_frmla <- paste0(paste0(team_cols, collapse = " + "), " + checkpoint ~ in_out")
-cast_2008 <- dcast.data.table(molten_2008, formula = cast_frmla, value.var = "time")
-cast_2008[!is.na(`in`) & !is.na(out), pause := difftime(out, `in`, units = "mins")]
-
-# check for negative "pauses" which means an incorrect time
-cast_2008[pause < 0]
-
-# order and lag to calculate time between checkpoints. Can have missing checkpoints
-# which is ok, we just want to make sure the time is strictly increasing
-setkey(cast_2008, full_name, checkpoint)
-cast_2008[, last_out := shift(out, n = 1L, type = "lag"), by = full_name]
-
-# check for non-sensical in/out times between checkpoints
-cast_2008[`in` < last_out]
-
-
 all_results[['2008']] <- raw_2008
+
 ```
 
 ```{r combine}
@@ -419,50 +431,93 @@ all_results[['2008']] <- raw_2008
 
 results <- rbindlist(all_results, fill = TRUE, idcol = "year")
 
+results[, cleaned_name := gsub("[^[a-z0-9 ]", "", tolower(full_name))]
 
-
+# not populated for all
+results[, c("division", "miles", "notes") := NULL]
 
 # check that the times make sense by melting and reshaping the data to calculate the 
 # length of breaks at checkpoints and the time between checkpoints
-team_cols <- c("full_name", "start_time", "finish_time")
-molten_2018 <- melt.data.table(raw_2018, id.vars = team_cols, variable.name = "cp_status", value.name = "time", measure.vars = cp_cols, na.rm = TRUE)
+cp_cols        <- grep("^cp", names(results), value = TRUE)
+team_cols      <- c("year", "full_name", "start_time", "gender", "age")
+molten_results <- melt.data.table(results, id.vars = team_cols, variable.name = "cp_status", value.name = "time", measure.vars = cp_cols, na.rm = TRUE)
 
 # split the checkpoint in/out into two variables... e.g cp2_in -> checkpoint = 2, in_out = "in"
-molten_2018[, c("checkpoint", "in_out") := tstrsplit(cp_status, "_")]
-molten_2018[, checkpoint := as.integer(gsub("cp", "", checkpoint))]
+molten_results[, c("checkpoint", "in_out") := tstrsplit(cp_status, "_")]
+molten_results[, checkpoint := as.integer(gsub("cp", "", checkpoint))]
 
 cast_frmla <- paste0(paste0(team_cols, collapse = " + "), " + checkpoint ~ in_out")
-cast_2018 <- dcast.data.table(molten_2018, formula = cast_frmla, value.var = "time")
-cast_2018[!is.na(`in`) & !is.na(out), pause := difftime(out, `in`, units = "mins")]
+cast_results <- dcast.data.table(molten_results, formula = cast_frmla, value.var = "time")
+cast_results[!is.na(`in`) & !is.na(out), pause := difftime(out, `in`, units = "mins")]
 
 # check for negative "pauses" which means an incorrect time
-cast_2018[pause < 0]
+cast_results[pause < 0]
 
 # order and lag to calculate time between checkpoints. Can have missing checkpoints
 # which is ok, we just want to make sure the time is strictly increasing
-setkey(cast_2018, full_name, checkpoint)
-cast_2018[, last_out := shift(out, n = 1L, type = "lag"), by = full_name]
+setkey(cast_results, year, full_name, checkpoint)
+cast_results[, last_seen := dplyr::coalesce(
+      shift(out, n = 1L, type = "lag")
+    , shift(`in`, n = 1L, type = "lag")
+  ), by = .(year, full_name)]
+
+cast_results[, next_seen := dplyr::coalesce(
+      shift(`in`, n = 1L, type = "lead")
+    , shift(out, n = 1L, type = "lead")
+  ), by = .(year, full_name)]
+
+cast_results[, `:=`(
+    n_cp_complete  = length(unique(checkpoint))
+  , max_checkpoint = max(checkpoint)
+), by = .(year, full_name)]
+
+official_results <- cast_results[n_cp_complete == max_checkpoint] %>%
+  merge(distances, by = "checkpoint", all.x = TRUE)
+
+official_results[max_checkpoint != 7, finish_time := NA]
 
 # check for non-sensical in/out times between checkpoints
-cast_2018[`in` < last_out]
+official_results[`in` < last_seen]
+
+# check for non-sensical start times
+official_results[start_time >= `in`]
+
+# check for non-sensical finish times
+official_results[finish_time < `out`]
+
+# finish time is the last `in`
+official_results[, `:=`(
+  last_checkpoint_time = with(.SD[checkpoint == max_checkpoint], dplyr::coalesce(`in`, out))
+), by = .(year, full_name)]
+
 ```
 
-## R Markdown
+```{r analysis}
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+# calculate cumulative time
+cast_results[, cumul_in := difftime(`in`, start_time, units = "mins")]
 
-```{r cars}
-summary(cars)
+library("jsonlite")
+
+weather_dates <- ls(pattern = "event_start_*") %>% 
+  map(get) %>% map(as.Date) %>% map(~. + -13:1) %>%
+  reduce(c)
+
+key <- readRDS("data/weather-premium-key.rds")
+
+walk(weather_dates, function(date) {
+  weather_file <- paste0("data/weather-", date, ".json")
+  weather <- fromJSON(paste0('http://api.worldweatheronline.com/premium/v1/past-weather.ashx?key=', key, '&q=53010&format=json&extra=isDayTime&date=', date, '&includelocation=yes&tp=1'))
+  
+  if (is.null(weather$`data`$error)) {
+    write_json(weather, weather_file)
+  }
+})
+lk <- 
+
+
+
+, 
 ```
 
-## Including Plots
-
-You can also embed plots, for example:
-
-```{r pressure, echo=FALSE}
-plot(pressure)
-```
-
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
