@@ -14,6 +14,7 @@ library("stringr")
 library("xml2")
 library("tidyr")
 library("readxl")
+library("jsonlite")
 
 # Data Manipulation, Aggregation
 library("data.table")
@@ -24,6 +25,7 @@ library("ggplot2")
 library("plotly")
 library("shiny")
 library("shinyjs")
+library("Hmisc")
 
 seconds_in_a_day <- (60 * 24 * 60) 
 
@@ -439,7 +441,7 @@ results[, c("division", "miles", "notes") := NULL]
 # check that the times make sense by melting and reshaping the data to calculate the 
 # length of breaks at checkpoints and the time between checkpoints
 cp_cols        <- grep("^cp", names(results), value = TRUE)
-team_cols      <- c("year", "full_name", "start_time", "gender", "age")
+team_cols      <- c("year", "full_name", "start_time", "finish_time", "gender", "age")
 molten_results <- melt.data.table(results, id.vars = team_cols, variable.name = "cp_status", value.name = "time", measure.vars = cp_cols, na.rm = TRUE)
 
 # split the checkpoint in/out into two variables... e.g cp2_in -> checkpoint = 2, in_out = "in"
@@ -473,6 +475,7 @@ cast_results[, `:=`(
 
 official_results <- cast_results[n_cp_complete == max_checkpoint] %>%
   merge(distances, by = "checkpoint", all.x = TRUE)
+setkey(official_results, year, full_name, checkpoint)
 
 official_results[max_checkpoint != 7, finish_time := NA]
 
@@ -485,20 +488,61 @@ official_results[start_time >= `in`]
 # check for non-sensical finish times
 official_results[finish_time < `out`]
 
+official_results <- official_results[!is.na(finish_time)] %>%
+  .[, .(year, full_name, start_time, gender, age, `in` = finish_time)] %>%
+  unique() %>%
+  cbind(distances[checkpoint == 8]) %>%
+  rbind(official_results, fill = TRUE) %>%
+  .[, -c("finish_time", "last_seen", "next_seen")]
+
+setkey(official_results, year, full_name, checkpoint)
+official_results[, `:=`(
+    n_cp_complete  = length(unique(checkpoint))
+  , max_checkpoint = max(checkpoint)
+), by = .(year, full_name)]
+
+
+official_results[, `:=`(
+  cumulative_time = difftime(`in`, start_time, units = "mins")
+)]
+
+
 # finish time is the last `in`
 official_results[, `:=`(
   last_checkpoint_time = with(.SD[checkpoint == max_checkpoint], dplyr::coalesce(`in`, out))
 ), by = .(year, full_name)]
 
+
+official_summary <- unique(
+  official_results[checkpoint == max_checkpoint, .(year, full_name, start_time, gender, age, cumulative_mi, max_checkpoint, last_checkpoint_time)]
+)
+
+official_summary[, `:=`(
+  time_elapsed = difftime(last_checkpoint_time, start_time, units = "mins")
+)]
+
+setnames(official_summary, "cumulative_mi", "total_miles")
+
 ```
 
-```{r analysis}
+```{r basic-analysis}
+
+ggplot(official_summary, aes(year, total_miles)) +
+  geom_violin(aes(fill = year), trim = TRUE, show.legend = FALSE, bw = 4) +
+  geom_boxplot(width = 0.05) +
+  ylim(0, 65)
 
 
-# calculate cumulative time
-cast_results[, cumul_in := difftime(`in`, start_time, units = "mins")]
+  # geom_density(alpha = 0.1, adjust = 2) +
+  # stat_summary(fun.y=median, geom="point", size=2, color="red")
 
-library("jsonlite")
+ggplot(official_results, aes(cumulative_time, cumulative_mi, colour = year)) + 
+  geom_point(alpha = 0.4)
+
+```
+
+
+```{r weather-download, eval = FALSE}
 
 weather_dates <- ls(pattern = "event_start_*") %>% 
   map(get) %>% map(as.Date) %>% map(~. + -13:1) %>%
@@ -514,10 +558,6 @@ walk(weather_dates, function(date) {
     write_json(weather, weather_file)
   }
 })
-lk <- 
 
-
-
-, 
 ```
 
